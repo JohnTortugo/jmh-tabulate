@@ -235,12 +235,14 @@ def create_comparison_data(baseline_results: Dict[str, List[BenchmarkResult]],
     
     for file_name, results in baseline_results.items():
         for result in results:
-            key = f"{result.benchmark}_{result.mode}_{result.threads}"
+            params = '&'.join(f'{k}={result.params[k]}' for k in sorted(result.params))
+            key = f"{result.benchmark}_{result.mode}_{result.threads}_{params}"
             baseline_map[key] = result
     
     for file_name, results in treatment_results.items():
         for result in results:
-            key = f"{result.benchmark}_{result.mode}_{result.threads}"
+            params = '&'.join(f'{k}={result.params[k]}' for k in sorted(result.params))
+            key = f"{result.benchmark}_{result.mode}_{result.threads}_{params}"
             treatment_map[key] = result
     
     # Find common benchmarks
@@ -1280,14 +1282,14 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
     print(f"Interactive HTML report generated: {output_file}")
 
 
-def main():
+def main(basepath):
     """Main function to generate the benchmark comparison report."""
     print("JMH Benchmark Comparison Report Generator")
     print("=" * 50)
     
     # Check if baseline and treatment directories exist
-    baseline_dir = Path("baseline")
-    treatment_dir = Path("treatment")
+    baseline_dir = Path(basepath, "baseline")
+    treatment_dir = Path(basepath, "treatment")
     
     if not baseline_dir.exists():
         print(f"Error: Baseline directory '{baseline_dir}' does not exist")
@@ -1329,10 +1331,13 @@ def main():
     
     # Generate HTML report
     print("Generating HTML report...")
-    generate_html_report(comparison_data)
+    generate_html_report(comparison_data, output_file=basepath + "/benchmark_comparison_report.html")
     
     print("Done! Open 'benchmark_comparison_report.html' in your browser to view the report.")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) <= 1 :
+        print("Usage: " + sys.argv[0] + " <basepath-for-results-dir>")
+    else: 
+        main(sys.argv[1])
