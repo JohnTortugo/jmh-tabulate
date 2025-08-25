@@ -330,6 +330,21 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
     regressed_count = len([d for d in comparison_data if d['status'] == 'regressed'])
     unchanged_count = len([d for d in comparison_data if d['status'] == 'unchanged'])
     
+    # Calculate regression-specific statistics
+    regressions = [d['improvement_percent'] for d in comparison_data if d['status'] == 'regressed']
+    regression_speedups = [d['speedup'] for d in comparison_data if d['status'] == 'regressed']
+    
+    if regressions:
+        avg_regression = statistics.mean(regressions)
+        median_regression = statistics.median(regressions)
+        avg_regression_speedup = statistics.mean(regression_speedups)
+        median_regression_speedup = statistics.median(regression_speedups)
+    else:
+        avg_regression = 0
+        median_regression = 0
+        avg_regression_speedup = 1.0
+        median_regression_speedup = 1.0
+    
     # Generate HTML
     html_content = f"""
 <!DOCTYPE html>
@@ -719,24 +734,8 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     <div class="stat-label">Regressed</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{unchanged_count}</div>
-                    <div class="stat-label">Unchanged</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">{avg_improvement:.2f}%</div>
-                    <div class="stat-label">Avg Improvement</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">{median_improvement:.2f}%</div>
-                    <div class="stat-label">Median Improvement</div>
-                </div>
-                <div class="stat-card">
                     <div class="stat-value">{avg_speedup:.2f}x</div>
                     <div class="stat-label">Avg Speedup</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">{median_speedup:.2f}x</div>
-                    <div class="stat-label">Median Speedup</div>
                 </div>
             </div>
         </div>
@@ -771,9 +770,8 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     <th onclick="sortTable(2)">Baseline Score</th>
                     <th onclick="sortTable(3)">Treatment Score</th>
                     <th onclick="sortTable(4)">Unit</th>
-                    <th onclick="sortTable(5)">Improvement %</th>
-                    <th onclick="sortTable(6)">Speedup</th>
-                    <th onclick="sortTable(7)">Statistical Significance</th>
+                    <th onclick="sortTable(5)">Speedup</th>
+                    <th onclick="sortTable(6)">Statistical Significance</th>
                 </tr>
             </thead>
             <tbody id="benchmarkTableBody">
@@ -793,7 +791,6 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     <td class="number">{data['baseline_score']:.4f} ± {data['baseline_error']:.4f}</td>
                     <td class="number">{data['treatment_score']:.4f} ± {data['treatment_error']:.4f}</td>
                     <td>{data['unit']}</td>
-                    <td class="number {status_class}">{improvement_sign}{data['improvement_percent']:.2f}%</td>
                     <td class="number {status_class}">{data['speedup']:.2f}x</td>
                     <td>{significance_display}</td>
                 </tr>
@@ -857,7 +854,6 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     <td class="number">${{data.baseline_score.toFixed(4)}} ± ${{data.baseline_error.toFixed(4)}}</td>
                     <td class="number">${{data.treatment_score.toFixed(4)}} ± ${{data.treatment_error.toFixed(4)}}</td>
                     <td>${{data.unit}}</td>
-                    <td class="number ${{statusClass}}">${{improvementSign}}${{data.improvement_percent.toFixed(2)}}%</td>
                     <td class="number ${{statusClass}}">${{data.speedup.toFixed(2)}}x</td>
                     <td>${{significanceDisplay}}</td>
                 `;
@@ -884,6 +880,15 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             const regressedCount = filteredData.filter(d => d.status === 'regressed').length;
             const unchangedCount = filteredData.filter(d => d.status === 'unchanged').length;
             
+            // Calculate regression-specific statistics for filtered data
+            const regressions = filteredData.filter(d => d.status === 'regressed').map(d => d.improvement_percent);
+            const regressionSpeedups = filteredData.filter(d => d.status === 'regressed').map(d => d.speedup);
+            
+            const avgRegression = regressions.length > 0 ? regressions.reduce((a, b) => a + b, 0) / regressions.length : 0;
+            const medianRegression = regressions.length > 0 ? regressions.sort((a, b) => a - b)[Math.floor(regressions.length / 2)] : 0;
+            const avgRegressionSpeedup = regressionSpeedups.length > 0 ? regressionSpeedups.reduce((a, b) => a + b, 0) / regressionSpeedups.length : 1.0;
+            const medianRegressionSpeedup = regressionSpeedups.length > 0 ? regressionSpeedups.sort((a, b) => a - b)[Math.floor(regressionSpeedups.length / 2)] : 1.0;
+            
             // Update summary statistics if filtered
             if (filteredData.length < originalData.length) {{
                 document.getElementById('summaryTitle').textContent = 'Summary Statistics (Filtered)';
@@ -901,24 +906,8 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                         <div class="stat-label">Regressed</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">${{unchangedCount}}</div>
-                        <div class="stat-label">Unchanged</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${{avgImprovement.toFixed(2)}}%</div>
-                        <div class="stat-label">Avg Improvement</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${{medianImprovement.toFixed(2)}}%</div>
-                        <div class="stat-label">Median Improvement</div>
-                    </div>
-                    <div class="stat-card">
                         <div class="stat-value">${{avgSpeedup.toFixed(2)}}x</div>
                         <div class="stat-label">Avg Speedup</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${{medianSpeedup.toFixed(2)}}x</div>
-                        <div class="stat-label">Median Speedup</div>
                     </div>
                 `;
             }} else {{
@@ -938,24 +927,8 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                         <div class="stat-label">Regressed</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">{unchanged_count}</div>
-                        <div class="stat-label">Unchanged</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">{avg_improvement:.2f}%</div>
-                        <div class="stat-label">Avg Improvement</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">{median_improvement:.2f}%</div>
-                        <div class="stat-label">Median Improvement</div>
-                    </div>
-                    <div class="stat-card">
                         <div class="stat-value">{avg_speedup:.2f}x</div>
                         <div class="stat-label">Avg Speedup</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">{median_speedup:.2f}x</div>
-                        <div class="stat-label">Median Speedup</div>
                     </div>
                 `;
             }}
@@ -997,9 +970,8 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     case 2: aVal = a.baseline_score; bVal = b.baseline_score; break;
                     case 3: aVal = a.treatment_score; bVal = b.treatment_score; break;
                     case 4: aVal = a.unit; bVal = b.unit; break;
-                    case 5: aVal = a.improvement_percent; bVal = b.improvement_percent; break;
-                    case 6: aVal = a.speedup; bVal = b.speedup; break;
-                    case 7: aVal = a.statistical_significance.is_significant; bVal = b.statistical_significance.is_significant; break;
+                    case 5: aVal = a.speedup; bVal = b.speedup; break;
+                    case 6: aVal = a.statistical_significance.is_significant; bVal = b.statistical_significance.is_significant; break;
                     default: return 0;
                 }}
                 
