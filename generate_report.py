@@ -317,6 +317,53 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         print("No comparison data available to generate report")
         return
     
+    # Remove common prefix and suffix from benchmark names
+    def find_common_prefix_suffix(names):
+        if not names:
+            return "", ""
+        
+        # Find common prefix
+        prefix = names[0]
+        for name in names[1:]:
+            while prefix and not name.startswith(prefix):
+                prefix = prefix[:-1]
+        
+        # Find common suffix
+        suffix = names[0]
+        for name in names[1:]:
+            while suffix and not name.endswith(suffix):
+                suffix = suffix[1:]
+        
+        return prefix, suffix
+    
+    # Get all benchmark names
+    benchmark_names = [data['benchmark'] for data in comparison_data]
+    common_prefix, common_suffix = find_common_prefix_suffix(benchmark_names)
+    
+    # Remove common prefix and suffix, but ensure we don't remove everything
+    for data in comparison_data:
+        original_name = data['benchmark']
+        trimmed_name = original_name
+        
+        # Remove prefix if it exists and leaves meaningful content
+        if common_prefix and len(common_prefix) > 0:
+            trimmed_name = trimmed_name[len(common_prefix):]
+        
+        # Remove suffix if it exists and leaves meaningful content
+        if common_suffix and len(common_suffix) > 0 and len(trimmed_name) > len(common_suffix):
+            trimmed_name = trimmed_name[:-len(common_suffix)]
+        
+        # Ensure we have at least some meaningful name left
+        if not trimmed_name or len(trimmed_name.strip()) == 0:
+            trimmed_name = original_name
+        
+        # Clean up any leading/trailing dots or separators that might be left
+        trimmed_name = trimmed_name.strip('.')
+        if not trimmed_name:
+            trimmed_name = original_name
+            
+        data['display_name'] = trimmed_name
+    
     # Calculate summary statistics
     improvements = [d['improvement_percent'] for d in comparison_data]
     speedups = [d['speedup'] for d in comparison_data]
@@ -353,6 +400,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JMH Benchmark Comparison Report</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -756,8 +804,14 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                 <option value="sample">Sample Time</option>
                 <option value="ss">Single Shot</option>
             </select>
+            <select id="significanceFilter" onchange="filterTable()">
+                <option value="">All Significance</option>
+                <option value="significant">Statistically Significant</option>
+                <option value="not_significant">Not Significant</option>
+            </select>
             <button onclick="resetFilters()">Reset Filters</button>
             <button onclick="exportFilteredData()">Export Filtered Data</button>
+            <button onclick="showBarChart()">Show Bar Chart</button>
             
             <div class="filtered-stats" id="filteredStats"></div>
         </div>
@@ -786,7 +840,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         
         html_content += f"""
                 <tr>
-                    <td class="benchmark-name" title="{data['benchmark']}">{data['benchmark']}</td>
+                    <td class="benchmark-name" title="{data['benchmark']}">{data['display_name']}</td>
                     <td>{data['mode']}</td>
                     <td class="number">{data['baseline_score']:.4f} ± {data['baseline_error']:.4f}</td>
                     <td class="number">{data['treatment_score']:.4f} ± {data['treatment_error']:.4f}</td>
@@ -802,7 +856,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         </table>
     </div>
     
-    <!-- Modal -->
+    <!-- Detail Modal -->
     <div id="detailModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -811,6 +865,19 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             </div>
             <div id="modalBody">
                 <!-- Content will be dynamically populated -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Benchmark Speedup Chart</h2>
+                <span class="close" onclick="closeChartModal()">&times;</span>
+            </div>
+            <div style="height: 400px; position: relative;">
+                <canvas id="benchmarkChart"></canvas>
             </div>
         </div>
     </div>
@@ -824,13 +891,17 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             const benchmarkFilter = document.getElementById('benchmarkFilter').value.toLowerCase();
             const statusFilter = document.getElementById('statusFilter').value;
             const modeFilter = document.getElementById('modeFilter').value;
+            const significanceFilter = document.getElementById('significanceFilter').value;
             
             filteredData = originalData.filter(row => {{
                 const matchesBenchmark = row.benchmark.toLowerCase().includes(benchmarkFilter);
                 const matchesStatus = !statusFilter || row.status === statusFilter;
                 const matchesMode = !modeFilter || row.mode === modeFilter;
+                const matchesSignificance = !significanceFilter || 
+                    (significanceFilter === 'significant' && row.statistical_significance.is_significant) ||
+                    (significanceFilter === 'not_significant' && !row.statistical_significance.is_significant);
                 
-                return matchesBenchmark && matchesStatus && matchesMode;
+                return matchesBenchmark && matchesStatus && matchesMode && matchesSignificance;
             }});
             
             updateTable();
@@ -849,7 +920,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                 const row = document.createElement('tr');
                 row.onclick = () => showBenchmarkDetails(data);
                 row.innerHTML = `
-                    <td class="benchmark-name" title="${{data.benchmark}}">${{data.benchmark}}</td>
+                    <td class="benchmark-name" title="${{data.benchmark}}">${{data.display_name || data.benchmark}}</td>
                     <td>${{data.mode}}</td>
                     <td class="number">${{data.baseline_score.toFixed(4)}} ± ${{data.baseline_error.toFixed(4)}}</td>
                     <td class="number">${{data.treatment_score.toFixed(4)}} ± ${{data.treatment_error.toFixed(4)}}</td>
@@ -992,6 +1063,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             document.getElementById('benchmarkFilter').value = '';
             document.getElementById('statusFilter').value = '';
             document.getElementById('modeFilter').value = '';
+            document.getElementById('significanceFilter').value = '';
             filteredData = [...originalData];
             updateTable();
             updateFilteredStats();
@@ -1081,10 +1153,6 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     <div class="detail-section">
                         <h3>Baseline Details</h3>
                         <div class="detail-row">
-                            <span class="detail-label">JDK:</span>
-                            <span class="detail-value">${{data.baseline_details.jdk || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
                             <span class="detail-label">VM Name:</span>
                             <span class="detail-value">${{data.baseline_details.vm_name || 'N/A'}}</span>
                         </div>
@@ -1140,10 +1208,6 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                     
                     <div class="detail-section">
                         <h3>Treatment Details</h3>
-                        <div class="detail-row">
-                            <span class="detail-label">JDK:</span>
-                            <span class="detail-value">${{data.treatment_details.jdk || 'N/A'}}</span>
-                        </div>
                         <div class="detail-row">
                             <span class="detail-label">VM Name:</span>
                             <span class="detail-value">${{data.treatment_details.vm_name || 'N/A'}}</span>
@@ -1224,11 +1288,113 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             document.getElementById('detailModal').style.display = 'none';
         }}
         
+        function showBarChart() {{
+            if (filteredData.length === 0) {{
+                alert('No data available to display in chart');
+                return;
+            }}
+            
+            const modal = document.getElementById('chartModal');
+            const ctx = document.getElementById('benchmarkChart').getContext('2d');
+            
+            // Prepare data for the chart - keep same order as grid, limit to first 20 for readability
+            const chartData = filteredData.slice(0, Math.min(20, filteredData.length));
+            
+            const labels = chartData.map(d => {{
+                // Use display name (with common prefix/suffix removed)
+                const name = d.display_name || d.benchmark;
+                return name.length > 50 ? name.substring(0, 50) + '...' : name;
+            }});
+            
+            const speedupValues = chartData.map(d => d.speedup);
+            const backgroundColors = chartData.map(d => {{
+                if (d.status === 'improved') return '#28a745';
+                if (d.status === 'regressed') return '#dc3545';
+                return '#6c757d';
+            }});
+            
+            // Destroy existing chart if it exists
+            if (window.benchmarkChartInstance) {{
+                window.benchmarkChartInstance.destroy();
+            }}
+            
+            // Create new chart
+            window.benchmarkChartInstance = new Chart(ctx, {{
+                type: 'bar',
+                data: {{
+                    labels: labels,
+                    datasets: [{{
+                        label: 'Speedup',
+                        data: speedupValues,
+                        backgroundColor: backgroundColors,
+                        borderColor: backgroundColors,
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        title: {{
+                            display: true,
+                            text: `Benchmark Speedup - First ${{chartData.length}} Results ${{filteredData.length < originalData.length ? '(Filtered)' : ''}}`
+                        }},
+                        legend: {{
+                            display: false
+                        }}
+                    }},
+                    scales: {{
+                        y: {{
+                            beginAtZero: false,
+                            title: {{
+                                display: true,
+                                text: 'Speedup (x)'
+                            }},
+                            grid: {{
+                                display: true
+                            }}
+                        }},
+                        x: {{
+                            title: {{
+                                display: true,
+                                text: 'Benchmarks'
+                            }},
+                            ticks: {{
+                                maxRotation: 45,
+                                minRotation: 45
+                            }}
+                        }}
+                    }},
+                    onClick: (event, elements) => {{
+                        if (elements.length > 0) {{
+                            const index = elements[0].index;
+                            const benchmark = chartData[index];
+                            showBenchmarkDetails(benchmark);
+                            closeChartModal();
+                        }}
+                    }},
+                    onHover: (event, elements) => {{
+                        event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
+                    }}
+                }}
+            }});
+            
+            modal.style.display = 'block';
+        }}
+        
+        function closeChartModal() {{
+            document.getElementById('chartModal').style.display = 'none';
+        }}
+        
         // Close modal when clicking outside of it
         window.onclick = function(event) {{
-            const modal = document.getElementById('detailModal');
-            if (event.target === modal) {{
+            const detailModal = document.getElementById('detailModal');
+            const chartModal = document.getElementById('chartModal');
+            if (event.target === detailModal) {{
                 closeModal();
+            }}
+            if (event.target === chartModal) {{
+                closeChartModal();
             }}
         }}
         
@@ -1236,6 +1402,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         document.addEventListener('keydown', function(event) {{
             if (event.key === 'Escape') {{
                 closeModal();
+                closeChartModal();
             }}
         }});
         
