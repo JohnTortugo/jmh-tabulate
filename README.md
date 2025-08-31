@@ -2,29 +2,45 @@
 
 This tool compares JMH (Java Microbenchmark Harness) benchmark results between
 two different JVM implementations (baseline and treatment) and generates an
-interactive HTML report.
+interactive HTML report with advanced analytics and visualization features.
 
 ## Features
 
+### Core Functionality
 - **Interactive HTML Report**: Sort and filter benchmark results in your browser
 - **Performance Metrics**: Shows improvement percentages, speedup factors, and statistical summaries
-- **Filtering Options**: Filter by benchmark name, status (improved/regressed/unchanged), and mode
+- **Statistical Significance Analysis**: Automatically detects insufficient sample sizes and displays "?" when statistical analysis is not possible
+- **Filtering Options**: Filter by benchmark name, status (improved/regressed/unchanged), mode, and statistical significance
 - **Export Functionality**: Export filtered results to CSV
 - **Aggregate Statistics**: Shows average and median improvements across filtered results
 - **Real-time Updates**: Statistics update automatically when filters are applied
+
+### Advanced Features
+- **Interactive Bar Charts**: Professional Chart.js visualizations with color-coded performance indicators
+- **Experiment Details**: Parse and display comprehensive experiment metadata from details files
+- **Insufficient Sample Detection**: Automatically identifies when there are too few samples (≤1 measurement iterations or ≤1 forks) for reliable statistical analysis
+- **Responsive Design**: Modern UI with tooltips, modal dialogs, and mobile-friendly layout
+- **Benchmark Details**: Click on any benchmark row to see detailed comparison metrics
+
+### UI Improvements
+- **Shorter Column Headers**: Concise headers with descriptive tooltips
+- **Center-Aligned Content**: Professional table layout with proper alignment
+- **Color-Coded Results**: Green for improvements, red for regressions, gray for unchanged
+- **Modal Dialogs**: Clean popup windows for charts and detailed information
 
 ## Directory Structure
 
 The script expects the following directory structure:
 
 ```
-jdk-jmh-plots/
+experiment-directory/
 ├── generate_report.py
-├── baseline/           # OpenJDK JMH JSON results
+├── details                 # Optional: Experiment metadata file
+├── baseline/              # OpenJDK JMH JSON results
 │   ├── result1.json
 │   ├── result2.json
 │   └── ...
-└── treatment/          # GraalVM CE JMH JSON results
+└── treatment/             # GraalVM CE JMH JSON results
     ├── result1.json
     ├── result2.json
     └── ...
@@ -33,17 +49,46 @@ jdk-jmh-plots/
 ## Usage
 
 1. **Prepare your data**:
-   - Create `baseline/` directory and add your OpenJDK JMH JSON result files
-   - Create `treatment/` directory and add your GraalVM CE JMH JSON result files
+   - Create `baseline/` directory and add your baseline JMH JSON result files
+   - Create `treatment/` directory and add your treatment JMH JSON result files
+   - Optionally create a `details` file with experiment metadata
 
 2. **Run the script**:
    ```bash
-   python3 generate_report.py
+   python3 generate_report.py <experiment-directory>
    ```
 
 3. **View the report**:
    - Open the generated `benchmark_comparison_report.html` file in your browser
    - Use the interactive controls to filter and sort the results
+   - Click "Show Bar Chart" to view performance visualizations
+   - Click "📋 Experiment Details" to view experiment metadata (if available)
+
+## Experiment Details File
+
+Create an optional `details` file in your experiment directory to include metadata in the report. The file supports any number of sections, where each section starts with a line beginning with "-":
+
+```
+- Title:
+Performance Comparison: OpenJDK vs GraalVM CE
+
+- Description:
+This experiment compares the performance of Java microbenchmarks
+between OpenJDK 11 and GraalVM CE 21.
+
+- Test Environment
+OS: macOS 13.0
+CPU: Apple M1 Pro
+Memory: 16GB RAM
+
+- JVM Configurations:
+Baseline: OpenJDK 11.0.2
+Treatment: GraalVM CE 21.0.0
+
+- Additional Notes
+All benchmarks were run with the same JVM arguments.
+System was idle during benchmark execution.
+```
 
 ## JMH JSON Format
 
