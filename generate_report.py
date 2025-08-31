@@ -133,11 +133,76 @@ def load_benchmark_results(directory: Path) -> Dict[str, List[BenchmarkResult]]:
     return results
 
 
+def parse_details_file(basepath: Path) -> Dict[str, str]:
+    """Parse the details file containing experiment information."""
+    details_file = basepath / "details"
+    details = {}
+    
+    if not details_file.exists():
+        print(f"Details file not found at {details_file}")
+        return details
+    
+    try:
+        with open(details_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        print(f"Loading experiment details from {details_file}")
+        
+        # Parse the details file format
+        current_key = None
+        current_value = []
+        
+        for line in content.split('\n'):
+            line = line.rstrip()
+            
+            # Check if this is a new section header (starts with "-")
+            if line.startswith('-'):
+                # Save previous key-value pair if exists
+                if current_key:
+                    details[current_key] = '\n'.join(current_value).strip()
+                
+                # Start new key - remove the leading "-" and any trailing ":"
+                current_key = line[1:].strip()
+                if current_key.endswith(':'):
+                    current_key = current_key[:-1].strip()
+                current_value = []
+            
+            elif current_key is not None:
+                # This is content for the current section
+                # Preserve the line as-is, including empty lines for formatting
+                current_value.append(line)
+        
+        # Don't forget the last key-value pair
+        if current_key:
+            details[current_key] = '\n'.join(current_value).strip()
+        
+        print(f"Parsed {len(details)} details sections")
+        return details
+        
+    except Exception as e:
+        print(f"Error parsing details file {details_file}: {e}")
+        return {}
+
+
 def calculate_statistical_significance(baseline: BenchmarkResult, treatment: BenchmarkResult) -> Dict:
     """Calculate statistical significance using approximate t-test."""
+    # Check for insufficient samples - need at least 2 measurement iterations for each
+    baseline_iterations = baseline.measurement_iterations
+    treatment_iterations = treatment.measurement_iterations
+    
+    # If either has only 1 sample or insufficient data, return insufficient data indicator
+    if (baseline_iterations <= 1 or treatment_iterations <= 1 or 
+        baseline.forks <= 1 or treatment.forks <= 1):
+        return {
+            'is_significant': None,  # None indicates insufficient data
+            'confidence_level': '?',
+            't_statistic': None,
+            'insufficient_data': True
+        }
+    
     # Use score error as estimate of standard error
     # Approximate degrees of freedom (conservative estimate)
-    df = 30  # Typical JMH measurement iterations
+    df = min(baseline_iterations + treatment_iterations - 2, 30)
     
     # Calculate t-statistic
     baseline_score = baseline.score
@@ -151,8 +216,9 @@ def calculate_statistical_significance(baseline: BenchmarkResult, treatment: Ben
     if pooled_se == 0:
         return {
             'is_significant': False,
-            'p_value': 1.0,
-            'confidence_level': 'N/A'
+            'confidence_level': 'N/A',
+            't_statistic': 0,
+            'insufficient_data': False
         }
     
     # Calculate t-statistic
@@ -177,7 +243,8 @@ def calculate_statistical_significance(baseline: BenchmarkResult, treatment: Ben
     return {
         'is_significant': is_significant,
         'confidence_level': confidence_level,
-        't_statistic': t_stat
+        't_statistic': t_stat,
+        'insufficient_data': False
     }
 
 
@@ -237,12 +304,14 @@ def create_comparison_data(baseline_results: Dict[str, List[BenchmarkResult]],
         for result in results:
             params = '&'.join(f'{k}={result.params[k]}' for k in sorted(result.params))
             key = f"{result.benchmark}_{result.mode}_{result.threads}_{params}"
+            print(key)
             baseline_map[key] = result
     
     for file_name, results in treatment_results.items():
         for result in results:
             params = '&'.join(f'{k}={result.params[k]}' for k in sorted(result.params))
             key = f"{result.benchmark}_{result.mode}_{result.threads}_{params}"
+            print(key)
             treatment_map[key] = result
     
     # Find common benchmarks
@@ -310,7 +379,7 @@ def create_comparison_data(baseline_results: Dict[str, List[BenchmarkResult]],
     return comparison_data
 
 
-def generate_html_report(comparison_data: List[Dict], output_file: str = "benchmark_comparison_report.html"):
+def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[str, str] = None, output_file: str = "benchmark_comparison_report.html"):
     """Generate an interactive HTML report."""
     
     if not comparison_data:
@@ -392,92 +461,96 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         avg_regression_speedup = 1.0
         median_regression_speedup = 1.0
     
+    # Determine the report title
+    report_title = "JMH Benchmark Comparison Report"
+    if experiment_details and 'Title' in experiment_details:
+        report_title = experiment_details['Title'].strip()
+    
     # Generate HTML
-    html_content = f"""
-<!DOCTYPE html>
+    html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JMH Benchmark Comparison Report</title>
+    <title>""" + report_title + """</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {{
+        body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 20px;
             background-color: #f5f5f5;
-        }}
+        }
         
-        .container {{
+        .container {
             max-width: 1400px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
+        }
         
-        h1 {{
+        h1 {
             color: #333;
             text-align: center;
             margin-bottom: 30px;
-        }}
+        }
         
-        .summary {{
+        .summary {
             background-color: #f8f9fa;
             padding: 20px;
             border-radius: 5px;
             margin-bottom: 30px;
             border-left: 4px solid #007bff;
-        }}
+        }
         
-        .summary h2 {{
+        .summary h2 {
             margin-top: 0;
             color: #007bff;
-        }}
+        }
         
-        .stats-grid {{
+        .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
             margin-bottom: 20px;
-        }}
+        }
         
-        .stat-card {{
+        .stat-card {
             background-color: white;
             padding: 15px;
             border-radius: 5px;
             border: 1px solid #e9ecef;
             text-align: center;
-        }}
+        }
         
-        .stat-value {{
+        .stat-value {
             font-size: 24px;
             font-weight: bold;
             color: #007bff;
-        }}
+        }
         
-        .stat-label {{
+        .stat-label {
             font-size: 14px;
             color: #6c757d;
             margin-top: 5px;
-        }}
+        }
         
-        .controls {{
+        .controls {
             margin-bottom: 20px;
             padding: 15px;
             background-color: #f8f9fa;
             border-radius: 5px;
-        }}
+        }
         
-        .controls input, .controls select {{
+        .controls input, .controls select {
             margin: 5px;
             padding: 8px;
             border: 1px solid #ddd;
             border-radius: 4px;
-        }}
+        }
         
-        .controls button {{
+        .controls button {
             padding: 8px 16px;
             background-color: #007bff;
             color: white;
@@ -485,62 +558,63 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             border-radius: 4px;
             cursor: pointer;
             margin: 5px;
-        }}
+        }
         
-        .controls button:hover {{
+        .controls button:hover {
             background-color: #0056b3;
-        }}
+        }
         
-        table {{
+        table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 20px;
-        }}
+        }
         
-        th, td {{
+        th, td {
             padding: 12px;
             text-align: left;
             border-bottom: 1px solid #ddd;
-        }}
+        }
         
-        th {{
+        th {
             background-color: #f8f9fa;
             font-weight: 600;
             cursor: pointer;
             user-select: none;
             position: relative;
-        }}
+            text-align: center;
+        }
         
-        th:hover {{
+        th:hover {
             background-color: #e9ecef;
-        }}
+        }
         
-        th.sorted-asc::after {{
+        th.sorted-asc::after {
             content: ' ↑';
             position: absolute;
             right: 8px;
-        }}
+        }
         
-        th.sorted-desc::after {{
+        th.sorted-desc::after {
             content: ' ↓';
             position: absolute;
             right: 8px;
-        }}
+        }
         
-        tr:hover {{
+        tr:hover {
             background-color: #f8f9fa;
-        }}
+        }
         
-        tbody tr {{
+        tbody tr {
             cursor: pointer;
-        }}
+        }
         
-        tbody tr:hover {{
+        tbody tr:hover {
             background-color: #e3f2fd;
-        }}
+        }
         
         /* Modal styles */
-        .modal {{
+        .modal {
             display: none;
             position: fixed;
             z-index: 1000;
@@ -550,9 +624,9 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             height: 100%;
             overflow: auto;
             background-color: rgba(0,0,0,0.4);
-        }}
+        }
         
-        .modal-content {{
+        .modal-content {
             background-color: #fefefe;
             margin: 2% auto;
             padding: 20px;
@@ -563,140 +637,140 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             max-height: 90vh;
             overflow-y: auto;
             box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        }}
+        }
         
-        .modal-header {{
+        .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 2px solid #007bff;
-        }}
+        }
         
-        .modal-title {{
+        .modal-title {
             color: #333;
             margin: 0;
             font-size: 24px;
-        }}
+        }
         
-        .close {{
+        .close {
             color: #aaa;
             float: right;
             font-size: 28px;
             font-weight: bold;
             cursor: pointer;
             transition: color 0.3s;
-        }}
+        }
         
         .close:hover,
-        .close:focus {{
+        .close:focus {
             color: #000;
             text-decoration: none;
-        }}
+        }
         
-        .detail-grid {{
+        .detail-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 20px;
             margin-bottom: 20px;
-        }}
+        }
         
-        .detail-section {{
+        .detail-section {
             background-color: #f8f9fa;
             padding: 15px;
             border-radius: 8px;
             border-left: 4px solid #007bff;
-        }}
+        }
         
-        .detail-section h3 {{
+        .detail-section h3 {
             color: #007bff;
             margin-top: 0;
             margin-bottom: 15px;
-        }}
+        }
         
-        .detail-row {{
+        .detail-row {
             display: flex;
             justify-content: space-between;
             margin-bottom: 8px;
             padding: 5px 0;
             border-bottom: 1px solid #e9ecef;
-        }}
+        }
         
-        .detail-label {{
+        .detail-label {
             font-weight: bold;
             color: #495057;
-        }}
+        }
         
-        .detail-value {{
+        .detail-value {
             color: #6c757d;
             font-family: monospace;
-        }}
+        }
         
-        .comparison-section {{
+        .comparison-section {
             background-color: #fff3cd;
             padding: 15px;
             border-radius: 8px;
             border-left: 4px solid #ffc107;
             margin-bottom: 20px;
-        }}
+        }
         
-        .comparison-section h3 {{
+        .comparison-section h3 {
             color: #856404;
             margin-top: 0;
-        }}
+        }
         
-        .metric-comparison {{
+        .metric-comparison {
             display: grid;
             grid-template-columns: 1fr auto 1fr;
             gap: 20px;
             align-items: center;
             margin-bottom: 15px;
-        }}
+        }
         
-        .metric-box {{
+        .metric-box {
             text-align: center;
             padding: 15px;
             border-radius: 8px;
             background-color: white;
             border: 1px solid #dee2e6;
-        }}
+        }
         
-        .metric-arrow {{
+        .metric-arrow {
             font-size: 24px;
             color: #6c757d;
-        }}
+        }
         
-        .metric-value {{
+        .metric-value {
             font-size: 18px;
             font-weight: bold;
             margin-bottom: 5px;
-        }}
+        }
         
-        .metric-error {{
+        .metric-error {
             font-size: 14px;
             color: #6c757d;
-        }}
+        }
         
-        .metric-label {{
+        .metric-label {
             font-size: 12px;
             color: #6c757d;
             margin-top: 5px;
-        }}
+        }
         
-        .secondary-metrics {{
+        .secondary-metrics {
             background-color: #e7f3ff;
             padding: 15px;
             border-radius: 8px;
             border-left: 4px solid #17a2b8;
-        }}
+        }
         
-        .secondary-metrics h4 {{
+        .secondary-metrics h4 {
             color: #0c5460;
             margin-top: 0;
-        }}
+        }
         
-        .jvm-args {{
+        .jvm-args {
             background-color: #f8f9fa;
             padding: 10px;
             border-radius: 4px;
@@ -706,83 +780,85 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             word-break: break-all;
             max-height: 100px;
             overflow-y: auto;
-        }}
+        }
         
-        .significance-badge {{
+        .significance-badge {
             display: inline-block;
             padding: 4px 8px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: bold;
-        }}
+        }
         
-        .significance-yes {{
+        .significance-yes {
             background-color: #d4edda;
             color: #155724;
-        }}
+        }
         
-        .significance-no {{
+        .significance-no {
             background-color: #f8d7da;
             color: #721c24;
-        }}
+        }
         
-        .status-improved {{
+        .status-improved {
             color: #28a745;
             font-weight: bold;
-        }}
+        }
         
-        .status-regressed {{
+        .status-regressed {
             color: #dc3545;
             font-weight: bold;
-        }}
+        }
         
-        .status-unchanged {{
+        .status-unchanged {
             color: #6c757d;
-        }}
+        }
         
-        .number {{
+        .number {
             text-align: right;
-        }}
+        }
         
-        .filtered-stats {{
+        .filtered-stats {
             background-color: #e7f3ff;
             padding: 10px;
             border-radius: 5px;
             margin-top: 10px;
-        }}
+        }
         
-        .benchmark-name {{
+        .benchmark-name {
             font-family: monospace;
             font-size: 12px;
             max-width: 300px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-        }}
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>JMH Benchmark Comparison Report</h1>
-        <p style="text-align: center; color: #6c757d;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <h1>""" + report_title + """</h1>
+        <p style="text-align: center; color: #6c757d;">Generated on """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        
+        """ + (f'<div style="text-align: center; margin-bottom: 20px;"><a href="#" onclick="showExperimentDetails(); return false;" style="color: #007bff; text-decoration: none; font-weight: bold;">📋 Experiment Details</a></div>' if experiment_details else '') + """
         
         <div class="summary">
             <h2 id="summaryTitle">Summary Statistics</h2>
             <div class="stats-grid" id="summaryStats">
                 <div class="stat-card">
-                    <div class="stat-value">{len(comparison_data)}</div>
+                    <div class="stat-value">""" + str(len(comparison_data)) + """</div>
                     <div class="stat-label">Total Benchmarks</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{improved_count}</div>
+                    <div class="stat-value">""" + str(improved_count) + """</div>
                     <div class="stat-label">Improved</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{regressed_count}</div>
+                    <div class="stat-value">""" + str(regressed_count) + """</div>
                     <div class="stat-label">Regressed</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{avg_speedup:.2f}x</div>
+                    <div class="stat-value">""" + f"{avg_speedup:.2f}x" + """</div>
                     <div class="stat-label">Avg Speedup</div>
                 </div>
             </div>
@@ -808,6 +884,7 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                 <option value="">All Significance</option>
                 <option value="significant">Statistically Significant</option>
                 <option value="not_significant">Not Significant</option>
+                <option value="insufficient_data">Insufficient Data (?)</option>
             </select>
             <button onclick="resetFilters()">Reset Filters</button>
             <button onclick="exportFilteredData()">Export Filtered Data</button>
@@ -819,13 +896,13 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         <table id="benchmarkTable">
             <thead>
                 <tr>
-                    <th onclick="sortTable(0)">Benchmark</th>
-                    <th onclick="sortTable(1)">Mode</th>
-                    <th onclick="sortTable(2)">Baseline Score</th>
-                    <th onclick="sortTable(3)">Treatment Score</th>
-                    <th onclick="sortTable(4)">Unit</th>
-                    <th onclick="sortTable(5)">Speedup</th>
-                    <th onclick="sortTable(6)">Statistical Significance</th>
+                    <th onclick="sortTable(0)" title="Benchmark Name">Benchmark</th>
+                    <th onclick="sortTable(1)" title="Baseline Score with Error">Baseline</th>
+                    <th onclick="sortTable(2)" title="Treatment Score with Error">Treatment</th>
+                    <th onclick="sortTable(3)" title="JMH Mode">Mode</th>
+                    <th onclick="sortTable(4)" title="Measurement Unit">Unit</th>
+                    <th onclick="sortTable(5)" title="Performance Speedup Factor">Speedup</th>
+                    <th onclick="sortTable(6)" title="Statistical Significance">SS</th>
                 </tr>
             </thead>
             <tbody id="benchmarkTableBody">
@@ -836,22 +913,27 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
         status_class = f"status-{data['status']}"
         improvement_sign = "+" if data['improvement_percent'] > 0 else ""
         sig_data = data['statistical_significance']
-        significance_display = "Yes" if sig_data['is_significant'] else "No"
+        
+        # Handle insufficient data case
+        if sig_data.get('insufficient_data', False):
+            significance_display = "?"
+        else:
+            significance_display = "Yes" if sig_data['is_significant'] else "No"
         
         html_content += f"""
                 <tr>
                     <td class="benchmark-name" title="{data['benchmark']}">{data['display_name']}</td>
-                    <td>{data['mode']}</td>
                     <td class="number">{data['baseline_score']:.4f} ± {data['baseline_error']:.4f}</td>
                     <td class="number">{data['treatment_score']:.4f} ± {data['treatment_error']:.4f}</td>
-                    <td>{data['unit']}</td>
-                    <td class="number {status_class}">{data['speedup']:.2f}x</td>
-                    <td>{significance_display}</td>
+                    <td style="text-align: center;">{data['mode']}</td>
+                    <td style="text-align: center;">{data['unit']}</td>
+                    <td class="number {status_class}" style="text-align: center;">{data['speedup']:.2f}x</td>
+                    <td style="text-align: center;">{significance_display}</td>
                 </tr>
 """
     
     # Add JavaScript for interactivity
-    html_content += f"""
+    html_content += """
             </tbody>
         </table>
     </div>
@@ -864,6 +946,19 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                 <span class="close" onclick="closeModal()">&times;</span>
             </div>
             <div id="modalBody">
+                <!-- Content will be dynamically populated -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- Experiment Details Modal -->
+    <div id="experimentModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">📋 Experiment Details</h2>
+                <span class="close" onclick="closeExperimentModal()">&times;</span>
+            </div>
+            <div id="experimentModalBody">
                 <!-- Content will be dynamically populated -->
             </div>
         </div>
@@ -883,61 +978,70 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
     </div>
     
     <script>
-        let originalData = {json.dumps(comparison_data)};
+        let originalData = """ + json.dumps(comparison_data) + """;
         let filteredData = [...originalData];
-        let currentSort = {{column: -1, direction: 'asc'}};
+        let currentSort = {column: -1, direction: 'asc'};
+        let experimentDetails = """ + (json.dumps(experiment_details) if experiment_details else 'null') + """;
         
-        function filterTable() {{
+        function filterTable() {
             const benchmarkFilter = document.getElementById('benchmarkFilter').value.toLowerCase();
             const statusFilter = document.getElementById('statusFilter').value;
             const modeFilter = document.getElementById('modeFilter').value;
             const significanceFilter = document.getElementById('significanceFilter').value;
             
-            filteredData = originalData.filter(row => {{
+            filteredData = originalData.filter(row => {
                 const matchesBenchmark = row.benchmark.toLowerCase().includes(benchmarkFilter);
                 const matchesStatus = !statusFilter || row.status === statusFilter;
                 const matchesMode = !modeFilter || row.mode === modeFilter;
                 const matchesSignificance = !significanceFilter || 
                     (significanceFilter === 'significant' && row.statistical_significance.is_significant) ||
-                    (significanceFilter === 'not_significant' && !row.statistical_significance.is_significant);
+                    (significanceFilter === 'not_significant' && !row.statistical_significance.is_significant) ||
+                    (significanceFilter === 'insufficient_data' && row.statistical_significance.insufficient_data);
                 
                 return matchesBenchmark && matchesStatus && matchesMode && matchesSignificance;
-            }});
+            });
             
             updateTable();
             updateFilteredStats();
-        }}
+        }
         
-        function updateTable() {{
+        function updateTable() {
             const tbody = document.getElementById('benchmarkTableBody');
             tbody.innerHTML = '';
             
-            filteredData.forEach((data, index) => {{
-                const statusClass = `status-${{data.status}}`;
+            filteredData.forEach((data, index) => {
+                const statusClass = `status-${data.status}`;
                 const improvementSign = data.improvement_percent > 0 ? '+' : '';
-                const significanceDisplay = data.statistical_significance.is_significant ? 'Yes' : 'No';
+                
+                // Handle insufficient data case
+                let significanceDisplay;
+                if (data.statistical_significance.insufficient_data) {
+                    significanceDisplay = '?';
+                } else {
+                    significanceDisplay = data.statistical_significance.is_significant ? 'Yes' : 'No';
+                }
                 
                 const row = document.createElement('tr');
                 row.onclick = () => showBenchmarkDetails(data);
                 row.innerHTML = `
-                    <td class="benchmark-name" title="${{data.benchmark}}">${{data.display_name || data.benchmark}}</td>
-                    <td>${{data.mode}}</td>
-                    <td class="number">${{data.baseline_score.toFixed(4)}} ± ${{data.baseline_error.toFixed(4)}}</td>
-                    <td class="number">${{data.treatment_score.toFixed(4)}} ± ${{data.treatment_error.toFixed(4)}}</td>
-                    <td>${{data.unit}}</td>
-                    <td class="number ${{statusClass}}">${{data.speedup.toFixed(2)}}x</td>
-                    <td>${{significanceDisplay}}</td>
+                    <td class="benchmark-name" title="${data.benchmark}">${data.display_name || data.benchmark}</td>
+                    <td class="number">${data.baseline_score.toFixed(4)} ± ${data.baseline_error.toFixed(4)}</td>
+                    <td class="number">${data.treatment_score.toFixed(4)} ± ${data.treatment_error.toFixed(4)}</td>
+                    <td style="text-align: center;">${data.mode}</td>
+                    <td style="text-align: center;">${data.unit}</td>
+                    <td class="number ${statusClass}" style="text-align: center;">${data.speedup.toFixed(2)}x</td>
+                    <td style="text-align: center;">${significanceDisplay}</td>
                 `;
                 tbody.appendChild(row);
-            }});
-        }}
+            });
+        }
         
-        function updateFilteredStats() {{
-            if (filteredData.length === 0) {{
+        function updateFilteredStats() {
+            if (filteredData.length === 0) {
                 document.getElementById('filteredStats').innerHTML = '<strong>No data matches current filters</strong>';
                 document.getElementById('summaryTitle').textContent = 'Summary Statistics';
                 return;
-            }}
+            }
             
             const improvements = filteredData.map(d => d.improvement_percent);
             const speedups = filteredData.map(d => d.speedup);
@@ -951,115 +1055,106 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             const regressedCount = filteredData.filter(d => d.status === 'regressed').length;
             const unchangedCount = filteredData.filter(d => d.status === 'unchanged').length;
             
-            // Calculate regression-specific statistics for filtered data
-            const regressions = filteredData.filter(d => d.status === 'regressed').map(d => d.improvement_percent);
-            const regressionSpeedups = filteredData.filter(d => d.status === 'regressed').map(d => d.speedup);
-            
-            const avgRegression = regressions.length > 0 ? regressions.reduce((a, b) => a + b, 0) / regressions.length : 0;
-            const medianRegression = regressions.length > 0 ? regressions.sort((a, b) => a - b)[Math.floor(regressions.length / 2)] : 0;
-            const avgRegressionSpeedup = regressionSpeedups.length > 0 ? regressionSpeedups.reduce((a, b) => a + b, 0) / regressionSpeedups.length : 1.0;
-            const medianRegressionSpeedup = regressionSpeedups.length > 0 ? regressionSpeedups.sort((a, b) => a - b)[Math.floor(regressionSpeedups.length / 2)] : 1.0;
-            
             // Update summary statistics if filtered
-            if (filteredData.length < originalData.length) {{
+            if (filteredData.length < originalData.length) {
                 document.getElementById('summaryTitle').textContent = 'Summary Statistics (Filtered)';
                 document.getElementById('summaryStats').innerHTML = `
                     <div class="stat-card">
-                        <div class="stat-value">${{filteredData.length}}</div>
+                        <div class="stat-value">${filteredData.length}</div>
                         <div class="stat-label">Total Benchmarks</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">${{improvedCount}}</div>
+                        <div class="stat-value">${improvedCount}</div>
                         <div class="stat-label">Improved</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">${{regressedCount}}</div>
+                        <div class="stat-value">${regressedCount}</div>
                         <div class="stat-label">Regressed</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">${{avgSpeedup.toFixed(2)}}x</div>
+                        <div class="stat-value">${avgSpeedup.toFixed(2)}x</div>
                         <div class="stat-label">Avg Speedup</div>
                     </div>
                 `;
-            }} else {{
+            } else {
                 document.getElementById('summaryTitle').textContent = 'Summary Statistics';
                 // Reset to original values
                 document.getElementById('summaryStats').innerHTML = `
                     <div class="stat-card">
-                        <div class="stat-value">{len(comparison_data)}</div>
+                        <div class="stat-value">""" + str(len(comparison_data)) + """</div>
                         <div class="stat-label">Total Benchmarks</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">{improved_count}</div>
+                        <div class="stat-value">""" + str(improved_count) + """</div>
                         <div class="stat-label">Improved</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">{regressed_count}</div>
+                        <div class="stat-value">""" + str(regressed_count) + """</div>
                         <div class="stat-label">Regressed</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value">{avg_speedup:.2f}x</div>
+                        <div class="stat-value">""" + f"{avg_speedup:.2f}x" + """</div>
                         <div class="stat-label">Avg Speedup</div>
                     </div>
                 `;
-            }}
+            }
             
             document.getElementById('filteredStats').innerHTML = `
                 <strong>Filtered Results:</strong> 
-                ${{filteredData.length}} benchmarks | 
-                ${{improvedCount}} improved | 
-                ${{regressedCount}} regressed | 
-                ${{unchangedCount}} unchanged | 
-                Avg: ${{avgImprovement.toFixed(2)}}% | 
-                Median: ${{medianImprovement.toFixed(2)}}% | 
-                Avg Speedup: ${{avgSpeedup.toFixed(2)}}x
+                ${filteredData.length} benchmarks | 
+                ${improvedCount} improved | 
+                ${regressedCount} regressed | 
+                ${unchangedCount} unchanged | 
+                Avg: ${avgImprovement.toFixed(2)}% | 
+                Median: ${medianImprovement.toFixed(2)}% | 
+                Avg Speedup: ${avgSpeedup.toFixed(2)}x
             `;
-        }}
+        }
         
-        function sortTable(columnIndex) {{
+        function sortTable(columnIndex) {
             const headers = document.querySelectorAll('th');
             
             // Remove existing sort classes
-            headers.forEach(header => {{
+            headers.forEach(header => {
                 header.classList.remove('sorted-asc', 'sorted-desc');
-            }});
+            });
             
             // Determine sort direction
             const direction = (currentSort.column === columnIndex && currentSort.direction === 'asc') ? 'desc' : 'asc';
-            currentSort = {{column: columnIndex, direction: direction}};
+            currentSort = {column: columnIndex, direction: direction};
             
             // Add sort class to current header
             headers[columnIndex].classList.add(direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
             
             // Sort the data
-            filteredData.sort((a, b) => {{
+            filteredData.sort((a, b) => {
                 let aVal, bVal;
                 
-                switch(columnIndex) {{
+                switch(columnIndex) {
                     case 0: aVal = a.benchmark; bVal = b.benchmark; break;
-                    case 1: aVal = a.mode; bVal = b.mode; break;
-                    case 2: aVal = a.baseline_score; bVal = b.baseline_score; break;
-                    case 3: aVal = a.treatment_score; bVal = b.treatment_score; break;
+                    case 1: aVal = a.baseline_score; bVal = b.baseline_score; break;
+                    case 2: aVal = a.treatment_score; bVal = b.treatment_score; break;
+                    case 3: aVal = a.mode; bVal = b.mode; break;
                     case 4: aVal = a.unit; bVal = b.unit; break;
                     case 5: aVal = a.speedup; bVal = b.speedup; break;
                     case 6: aVal = a.statistical_significance.is_significant; bVal = b.statistical_significance.is_significant; break;
                     default: return 0;
-                }}
+                }
                 
-                if (typeof aVal === 'number' && typeof bVal === 'number') {{
+                if (typeof aVal === 'number' && typeof bVal === 'number') {
                     return direction === 'asc' ? aVal - bVal : bVal - aVal;
-                }} else if (typeof aVal === 'boolean' && typeof bVal === 'boolean') {{
+                } else if (typeof aVal === 'boolean' && typeof bVal === 'boolean') {
                     return direction === 'asc' ? (aVal ? 1 : 0) - (bVal ? 1 : 0) : (bVal ? 1 : 0) - (aVal ? 1 : 0);
-                }} else {{
+                } else {
                     const comparison = String(aVal).localeCompare(String(bVal));
                     return direction === 'asc' ? comparison : -comparison;
-                }}
-            }});
+                }
+            });
             
             updateTable();
-        }}
+        }
         
-        function resetFilters() {{
+        function resetFilters() {
             document.getElementById('benchmarkFilter').value = '';
             document.getElementById('statusFilter').value = '';
             document.getElementById('modeFilter').value = '';
@@ -1067,9 +1162,9 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
             filteredData = [...originalData];
             updateTable();
             updateFilteredStats();
-        }}
+        }
         
-        function exportFilteredData() {{
+        function exportFilteredData() {
             const csvContent = [
                 ['Benchmark', 'Mode', 'Threads', 'Baseline Score', 'Treatment Score', 'Unit', 'Improvement %', 'Speedup', 'Status'],
                 ...filteredData.map(d => [
@@ -1078,337 +1173,219 @@ def generate_html_report(comparison_data: List[Dict], output_file: str = "benchm
                 ])
             ].map(row => row.join(',')).join('\\n');
             
-            const blob = new Blob([csvContent], {{ type: 'text/csv' }});
+            const blob = new Blob([csvContent], { type: 'text/csv' });
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = 'filtered_benchmark_results.csv';
             a.click();
             window.URL.revokeObjectURL(url);
-        }}
+        }
         
-        function showBenchmarkDetails(data) {{
+        function showExperimentDetails() {
+            if (!experimentDetails) {
+                alert('No experiment details available');
+                return;
+            }
+            
+            const modal = document.getElementById('experimentModal');
+            const modalBody = document.getElementById('experimentModalBody');
+            
+            let detailsHtml = '<div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #007bff;">';
+            
+            Object.entries(experimentDetails).forEach(([key, value], index) => {
+                if (index > 0) {
+                    detailsHtml += '<hr style="margin: 20px 0; border: none; border-top: 1px solid #dee2e6;">';
+                }
+                detailsHtml += `
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="color: #007bff; margin: 0 0 10px 0; font-size: 16px;">${key}</h4>
+                        <div style="background-color: white; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto;">${value.replace(/\\n/g, '<br>')}</div>
+                    </div>
+                `;
+            });
+            
+            detailsHtml += '</div>';
+            modalBody.innerHTML = detailsHtml;
+            modal.style.display = 'block';
+        }
+        
+        function closeExperimentModal() {
+            document.getElementById('experimentModal').style.display = 'none';
+        }
+        
+        function showBenchmarkDetails(data) {
+            // Implementation for benchmark details modal
             const modal = document.getElementById('detailModal');
             const modalTitle = document.getElementById('modalTitle');
             const modalBody = document.getElementById('modalBody');
             
             modalTitle.textContent = data.benchmark;
             
-            const statusClass = `status-${{data.status}}`;
+            const statusClass = `status-${data.status}`;
             const improvementSign = data.improvement_percent > 0 ? '+' : '';
-            const significanceClass = data.statistical_significance.is_significant ? 'significance-yes' : 'significance-no';
-            const significanceText = data.statistical_significance.is_significant ? 'Yes' : 'No';
             
-            // Generate secondary metrics HTML
-            let baselineSecondaryHtml = '';
-            let treatmentSecondaryHtml = '';
-            
-            if (data.baseline_details.secondary_metrics && Object.keys(data.baseline_details.secondary_metrics).length > 0) {{
-                baselineSecondaryHtml = Object.entries(data.baseline_details.secondary_metrics).map(([key, value]) => `
-                    <div class="detail-row">
-                        <span class="detail-label">${{key}}:</span>
-                        <span class="detail-value">${{value.score?.toFixed(4) || 'N/A'}} ${{value.scoreUnit || ''}}</span>
-                    </div>
-                `).join('');
-            }}
-            
-            if (data.treatment_details.secondary_metrics && Object.keys(data.treatment_details.secondary_metrics).length > 0) {{
-                treatmentSecondaryHtml = Object.entries(data.treatment_details.secondary_metrics).map(([key, value]) => `
-                    <div class="detail-row">
-                        <span class="detail-label">${{key}}:</span>
-                        <span class="detail-value">${{value.score?.toFixed(4) || 'N/A'}} ${{value.scoreUnit || ''}}</span>
-                    </div>
-                `).join('');
-            }}
+            // Handle insufficient data case for significance display
+            let significanceClass, significanceText;
+            if (data.statistical_significance.insufficient_data) {
+                significanceClass = 'significance-no';
+                significanceText = '?';
+            } else {
+                significanceClass = data.statistical_significance.is_significant ? 'significance-yes' : 'significance-no';
+                significanceText = data.statistical_significance.is_significant ? 'Yes' : 'No';
+            }
             
             modalBody.innerHTML = `
                 <div class="comparison-section">
                     <h3>Performance Comparison</h3>
                     <div class="metric-comparison">
                         <div class="metric-box">
-                            <div class="metric-value">${{data.baseline_score.toFixed(4)}}</div>
-                            <div class="metric-error">± ${{data.baseline_error.toFixed(4)}}</div>
-                            <div class="metric-label">Baseline (${{data.baseline_vm}})</div>
+                            <div class="metric-value">${data.baseline_score.toFixed(4)}</div>
+                            <div class="metric-error">± ${data.baseline_error.toFixed(4)}</div>
+                            <div class="metric-label">Baseline (${data.baseline_vm})</div>
                         </div>
                         <div class="metric-arrow">→</div>
                         <div class="metric-box">
-                            <div class="metric-value">${{data.treatment_score.toFixed(4)}}</div>
-                            <div class="metric-error">± ${{data.treatment_error.toFixed(4)}}</div>
-                            <div class="metric-label">Treatment (${{data.treatment_vm}})</div>
+                            <div class="metric-value">${data.treatment_score.toFixed(4)}</div>
+                            <div class="metric-error">± ${data.treatment_error.toFixed(4)}</div>
+                            <div class="metric-label">Treatment (${data.treatment_vm})</div>
                         </div>
                     </div>
                     <div style="text-align: center; margin: 15px 0;">
-                        <strong>Unit:</strong> ${{data.unit}} | 
-                        <strong class="${{statusClass}}">Improvement:</strong> <span class="${{statusClass}}">${{improvementSign}}${{data.improvement_percent.toFixed(2)}}%</span> | 
-                        <strong class="${{statusClass}}">Speedup:</strong> <span class="${{statusClass}}">${{data.speedup.toFixed(2)}}x</span>
+                        <strong>Unit:</strong> ${data.unit} | 
+                        <strong class="${statusClass}">Improvement:</strong> <span class="${statusClass}">${improvementSign}${data.improvement_percent.toFixed(2)}%</span> | 
+                        <strong class="${statusClass}">Speedup:</strong> <span class="${statusClass}">${data.speedup.toFixed(2)}x</span>
                     </div>
                     <div style="text-align: center;">
                         <strong>Statistical Significance:</strong> 
-                        <span class="significance-badge ${{significanceClass}}">${{significanceText}}</span>
-                        <span style="margin-left: 10px;">(${{data.statistical_significance.confidence_level}})</span>
+                        <span class="significance-badge ${significanceClass}">${significanceText}</span>
+                        <span style="margin-left: 10px;">(${data.statistical_significance.confidence_level})</span>
                     </div>
                 </div>
-                
-                <div class="detail-grid">
-                    <div class="detail-section">
-                        <h3>Baseline Details</h3>
-                        <div class="detail-row">
-                            <span class="detail-label">VM Name:</span>
-                            <span class="detail-value">${{data.baseline_details.vm_name || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">VM Version:</span>
-                            <span class="detail-value">${{data.baseline_details.vm_version || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Mode:</span>
-                            <span class="detail-value">${{data.mode}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Threads:</span>
-                            <span class="detail-value">${{data.threads}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Forks:</span>
-                            <span class="detail-value">${{data.baseline_details.forks}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Warmup Iterations:</span>
-                            <span class="detail-value">${{data.baseline_details.warmup_iterations}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Warmup Time:</span>
-                            <span class="detail-value">${{data.baseline_details.warmup_time || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Measurement Iterations:</span>
-                            <span class="detail-value">${{data.baseline_details.measurement_iterations}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Measurement Time:</span>
-                            <span class="detail-value">${{data.baseline_details.measurement_time || 'N/A'}}</span>
-                        </div>
-                        ${{data.baseline_details.score_confidence && data.baseline_details.score_confidence.length > 0 ? `
-                        <div class="detail-row">
-                            <span class="detail-label">Score Confidence:</span>
-                            <span class="detail-value">[${{data.baseline_details.score_confidence.map(x => x.toFixed(4)).join(', ')}}]</span>
-                        </div>
-                        ` : ''}}
-                        <div style="margin-top: 15px;">
-                            <strong>JVM Arguments:</strong>
-                            <div class="jvm-args">${{data.baseline_details.jvm_args.length > 0 ? data.baseline_details.jvm_args.join('\\n') : 'None'}}</div>
-                        </div>
-                        ${{data.baseline_details.params && Object.keys(data.baseline_details.params).length > 0 ? `
-                        <div style="margin-top: 15px;">
-                            <strong>Parameters:</strong>
-                            <div class="jvm-args">${{Object.entries(data.baseline_details.params).map(([key, value]) => `${{key}}: ${{value}}`).join('\\n')}}</div>
-                        </div>
-                        ` : ''}}
-                    </div>
-                    
-                    <div class="detail-section">
-                        <h3>Treatment Details</h3>
-                        <div class="detail-row">
-                            <span class="detail-label">VM Name:</span>
-                            <span class="detail-value">${{data.treatment_details.vm_name || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">VM Version:</span>
-                            <span class="detail-value">${{data.treatment_details.vm_version || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Mode:</span>
-                            <span class="detail-value">${{data.mode}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Threads:</span>
-                            <span class="detail-value">${{data.threads}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Forks:</span>
-                            <span class="detail-value">${{data.treatment_details.forks}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Warmup Iterations:</span>
-                            <span class="detail-value">${{data.treatment_details.warmup_iterations}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Warmup Time:</span>
-                            <span class="detail-value">${{data.treatment_details.warmup_time || 'N/A'}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Measurement Iterations:</span>
-                            <span class="detail-value">${{data.treatment_details.measurement_iterations}}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Measurement Time:</span>
-                            <span class="detail-value">${{data.treatment_details.measurement_time || 'N/A'}}</span>
-                        </div>
-                        ${{data.treatment_details.score_confidence && data.treatment_details.score_confidence.length > 0 ? `
-                        <div class="detail-row">
-                            <span class="detail-label">Score Confidence:</span>
-                            <span class="detail-value">[${{data.treatment_details.score_confidence.map(x => x.toFixed(4)).join(', ')}}]</span>
-                        </div>
-                        ` : ''}}
-                        <div style="margin-top: 15px;">
-                            <strong>JVM Arguments:</strong>
-                            <div class="jvm-args">${{data.treatment_details.jvm_args.length > 0 ? data.treatment_details.jvm_args.join('\\n') : 'None'}}</div>
-                        </div>
-                        ${{data.treatment_details.params && Object.keys(data.treatment_details.params).length > 0 ? `
-                        <div style="margin-top: 15px;">
-                            <strong>Parameters:</strong>
-                            <div class="jvm-args">${{Object.entries(data.treatment_details.params).map(([key, value]) => `${{key}}: ${{value}}`).join('\\n')}}</div>
-                        </div>
-                        ` : ''}}
-                    </div>
-                </div>
-                
-                ${{baselineSecondaryHtml || treatmentSecondaryHtml ? `
-                <div class="detail-grid">
-                    ${{baselineSecondaryHtml ? `
-                    <div class="secondary-metrics">
-                        <h4>Baseline Secondary Metrics</h4>
-                        ${{baselineSecondaryHtml}}
-                    </div>
-                    ` : '<div></div>'}}
-                    ${{treatmentSecondaryHtml ? `
-                    <div class="secondary-metrics">
-                        <h4>Treatment Secondary Metrics</h4>
-                        ${{treatmentSecondaryHtml}}
-                    </div>
-                    ` : '<div></div>'}}
-                </div>
-                ` : ''}}
             `;
             
             modal.style.display = 'block';
-        }}
+        }
         
-        function closeModal() {{
+        function closeModal() {
             document.getElementById('detailModal').style.display = 'none';
-        }}
+        }
         
-        function showBarChart() {{
-            if (filteredData.length === 0) {{
-                alert('No data available to display in chart');
-                return;
-            }}
-            
+        function showBarChart() {
             const modal = document.getElementById('chartModal');
-            const ctx = document.getElementById('benchmarkChart').getContext('2d');
+            const canvas = document.getElementById('benchmarkChart');
+            const ctx = canvas.getContext('2d');
             
-            // Prepare data for the chart - keep same order as grid, limit to first 20 for readability
-            const chartData = filteredData.slice(0, Math.min(20, filteredData.length));
+            // Clear any existing chart
+            if (window.benchmarkChartInstance) {
+                window.benchmarkChartInstance.destroy();
+            }
             
-            const labels = chartData.map(d => {{
-                // Use display name (with common prefix/suffix removed)
-                const name = d.display_name || d.benchmark;
-                return name.length > 50 ? name.substring(0, 50) + '...' : name;
-            }});
-            
-            const speedupValues = chartData.map(d => d.speedup);
-            const backgroundColors = chartData.map(d => {{
+            // Prepare data for the chart
+            const labels = filteredData.map(d => d.display_name || d.benchmark);
+            const speedups = filteredData.map(d => d.speedup);
+            const colors = filteredData.map(d => {
                 if (d.status === 'improved') return '#28a745';
                 if (d.status === 'regressed') return '#dc3545';
                 return '#6c757d';
-            }});
+            });
             
-            // Destroy existing chart if it exists
-            if (window.benchmarkChartInstance) {{
-                window.benchmarkChartInstance.destroy();
-            }}
-            
-            // Create new chart
-            window.benchmarkChartInstance = new Chart(ctx, {{
+            // Create the chart
+            window.benchmarkChartInstance = new Chart(ctx, {
                 type: 'bar',
-                data: {{
+                data: {
                     labels: labels,
-                    datasets: [{{
-                        label: 'Speedup',
-                        data: speedupValues,
-                        backgroundColor: backgroundColors,
-                        borderColor: backgroundColors,
+                    datasets: [{
+                        label: 'Speedup Factor',
+                        data: speedups,
+                        backgroundColor: colors,
+                        borderColor: colors,
                         borderWidth: 1
-                    }}]
-                }},
-                options: {{
+                    }]
+                },
+                options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: {{
-                        title: {{
-                            display: true,
-                            text: `Benchmark Speedup - First ${{chartData.length}} Results ${{filteredData.length < originalData.length ? '(Filtered)' : ''}}`
-                        }},
-                        legend: {{
-                            display: false
-                        }}
-                    }},
-                    scales: {{
-                        y: {{
-                            beginAtZero: false,
-                            title: {{
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
                                 display: true,
-                                text: 'Speedup (x)'
-                            }},
-                            grid: {{
-                                display: true
-                            }}
-                        }},
-                        x: {{
-                            title: {{
+                                text: 'Speedup Factor (x)'
+                            }
+                        },
+                        x: {
+                            title: {
                                 display: true,
                                 text: 'Benchmarks'
-                            }},
-                            ticks: {{
+                            },
+                            ticks: {
                                 maxRotation: 45,
                                 minRotation: 45
-                            }}
-                        }}
-                    }},
-                    onClick: (event, elements) => {{
-                        if (elements.length > 0) {{
-                            const index = elements[0].index;
-                            const benchmark = chartData[index];
-                            showBenchmarkDetails(benchmark);
-                            closeChartModal();
-                        }}
-                    }},
-                    onHover: (event, elements) => {{
-                        event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
-                    }}
-                }}
-            }});
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Benchmark Performance Speedup'
+                        },
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            callbacks: {
+                                afterLabel: function(context) {
+                                    const index = context.dataIndex;
+                                    const data = filteredData[index];
+                                    return [
+                                        `Mode: ${data.mode}`,
+                                        `Unit: ${data.unit}`,
+                                        `Improvement: ${data.improvement_percent.toFixed(2)}%`,
+                                        `Status: ${data.status}`
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
+            });
             
             modal.style.display = 'block';
-        }}
+        }
         
-        function closeChartModal() {{
+        function closeChartModal() {
             document.getElementById('chartModal').style.display = 'none';
-        }}
+        }
         
         // Close modal when clicking outside of it
-        window.onclick = function(event) {{
+        window.onclick = function(event) {
             const detailModal = document.getElementById('detailModal');
             const chartModal = document.getElementById('chartModal');
-            if (event.target === detailModal) {{
+            const experimentModal = document.getElementById('experimentModal');
+            if (event.target === detailModal) {
                 closeModal();
-            }}
-            if (event.target === chartModal) {{
+            }
+            if (event.target === chartModal) {
                 closeChartModal();
-            }}
-        }}
+            }
+            if (event.target === experimentModal) {
+                closeExperimentModal();
+            }
+        }
         
         // Close modal with Escape key
-        document.addEventListener('keydown', function(event) {{
-            if (event.key === 'Escape') {{
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
                 closeModal();
                 closeChartModal();
-            }}
-        }});
+                closeExperimentModal();
+            }
+        });
         
         // Initialize
         updateFilteredStats();
-        updateTable(); // Ensure click handlers are attached to initial rows
+        updateTable();
     </script>
 </body>
 </html>
@@ -1440,6 +1417,9 @@ def main(basepath):
         print("Please create the treatment directory and add your GraalVM CE JMH JSON files")
         return
     
+    # Parse experiment details if available
+    experiment_details = parse_details_file(Path(basepath))
+    
     # Load benchmark results
     print("Loading baseline results...")
     baseline_results = load_benchmark_results(baseline_dir)
@@ -1470,7 +1450,7 @@ def main(basepath):
     
     # Generate HTML report
     print("Generating HTML report...")
-    generate_html_report(comparison_data, output_file=basepath + "/benchmark_comparison_report.html")
+    generate_html_report(comparison_data, experiment_details, output_file=basepath + "/benchmark_comparison_report.html")
     
     print("Done! Open 'benchmark_comparison_report.html' in your browser to view the report.")
 
