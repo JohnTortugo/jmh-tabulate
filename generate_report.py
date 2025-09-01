@@ -926,7 +926,6 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
     # Add table rows
     for data in comparison_data:
         status_class = f"status-{data['status']}"
-        improvement_sign = "+" if data['improvement_percent'] > 0 else ""
         sig_data = data['statistical_significance']
         
         # Handle insufficient data case
@@ -947,7 +946,7 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                 </tr>
 """
     
-    # Add JavaScript for interactivity
+    # Add JavaScript for interactivity (patched error bar plugin placement)
     html_content += """
             </tbody>
         </table>
@@ -1026,7 +1025,6 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             
             filteredData.forEach((data, index) => {
                 const statusClass = `status-${data.status}`;
-                const improvementSign = data.improvement_percent > 0 ? '+' : '';
                 
                 // Handle insufficient data case
                 let significanceDisplay;
@@ -1062,9 +1060,9 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             const speedups = filteredData.map(d => d.speedup);
             
             const avgImprovement = improvements.reduce((a, b) => a + b, 0) / improvements.length;
-            const medianImprovement = improvements.sort((a, b) => a - b)[Math.floor(improvements.length / 2)];
+            const medianImprovement = improvements.slice().sort((a, b) => a - b)[Math.floor(improvements.length / 2)];
             const avgSpeedup = speedups.reduce((a, b) => a + b, 0) / speedups.length;
-            const medianSpeedup = speedups.sort((a, b) => a - b)[Math.floor(speedups.length / 2)];
+            const medianSpeedup = speedups.slice().sort((a, b) => a - b)[Math.floor(speedups.length / 2)];
             
             const improvedCount = filteredData.filter(d => d.status === 'improved').length;
             const regressedCount = filteredData.filter(d => d.status === 'regressed').length;
@@ -1238,7 +1236,6 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             modalTitle.textContent = data.benchmark;
             
             const statusClass = `status-${data.status}`;
-            const improvementSign = data.improvement_percent > 0 ? '+' : '';
             
             // Handle insufficient data case for significance display
             let significanceClass, significanceText;
@@ -1268,7 +1265,7 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                     </div>
                     <div style="text-align: center; margin: 15px 0;">
                         <strong>Unit:</strong> ${data.unit} | 
-                        <strong class="${statusClass}">Improvement:</strong> <span class="${statusClass}">${improvementSign}${data.improvement_percent.toFixed(2)}%</span> | 
+                        <strong class="${statusClass}">Improvement:</strong> <span class="${statusClass}">${data.improvement_percent.toFixed(2)}%</span> | 
                         <strong class="${statusClass}">Speedup:</strong> <span class="${statusClass}">${data.speedup.toFixed(2)}x</span>
                     </div>
                     <div style="text-align: center;">
@@ -1301,6 +1298,7 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             modal.style.display = 'block';
         }
         
+        // --------- PATCHED VERSION: proper plugin registration + EPS guards ---------
         function showChartJsBarChart() {
             const canvas = document.getElementById('benchmarkChart');
             const ctx = canvas.getContext('2d');
@@ -1319,59 +1317,100 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                 return '#6c757d';
             });
             
-            // Prepare confidence interval data for error bars
-            const errorBars = filteredData.map((d, index) => {
-                // Calculate confidence intervals for speedup based on baseline and treatment confidence intervals
-                const baselineConf = d.baseline_details.score_confidence;
-                const treatmentConf = d.treatment_details.score_confidence;
+            // Prepare confidence interval data for error bars with EPS to avoid /0
+            const EPS = 1e-12;
+            const errorBars = filteredData.map((d) => {
+                const baselineConf = d.baseline_details.score_confidence || [];
+                const treatmentConf = d.treatment_details.score_confidence || [];
                 
-                console.log(`Debug benchmark ${index}:`, d.benchmark);
-                console.log('Baseline confidence:', baselineConf);
-                console.log('Treatment confidence:', treatmentConf);
-                
-                if (baselineConf && baselineConf.length === 2 && treatmentConf && treatmentConf.length === 2) {
-                    // Calculate speedup confidence interval
-                    const higher_is_better = d.higher_is_better;
-                    let minSpeedup, maxSpeedup;
+                if (baselineConf.length === 2 && treatmentConf.length === 2) {
+                    const bLo = Math.max(baselineConf[0], EPS);
+                    const bHi = Math.max(baselineConf[1], EPS);
+                    const tLo = Math.max(treatmentConf[0], EPS);
+                    const tHi = Math.max(treatmentConf[1], EPS);
                     
-                    if (higher_is_better) {
+                    let minSpeedup, maxSpeedup;
+                    if (d.higher_is_better) {
                         // For throughput: speedup = treatment / baseline
-                        minSpeedup = treatmentConf[0] / baselineConf[1]; // min treatment / max baseline
-                        maxSpeedup = treatmentConf[1] / baselineConf[0]; // max treatment / min baseline
+                        minSpeedup = tLo / bHi; // min treatment / max baseline
+                        maxSpeedup = tHi / bLo; // max treatment / min baseline
                     } else {
                         // For latency: speedup = baseline / treatment
-                        minSpeedup = baselineConf[0] / treatmentConf[1]; // min baseline / max treatment
-                        maxSpeedup = baselineConf[1] / treatmentConf[0]; // max baseline / min treatment
+                        minSpeedup = bLo / tHi; // min baseline / max treatment
+                        maxSpeedup = bHi / tLo; // max baseline / min treatment
                     }
                     
                     return {
-                        minus: Math.abs(d.speedup - minSpeedup),
-                        plus: Math.abs(maxSpeedup - d.speedup)
+                        minus: Math.max(0, d.speedup - minSpeedup),
+                        plus:  Math.max(0, maxSpeedup - d.speedup)
                     };
                 }
                 
                 // Fallback to using score errors if confidence intervals not available
-                const baselineError = d.baseline_error;
-                const treatmentError = d.treatment_error;
+                const be = d.baseline_error;
+                const te = d.treatment_error;
                 
-                if (baselineError > 0 && treatmentError > 0) {
+                if (be > 0 && te > 0 && d.baseline_score > 0 && d.treatment_score > 0) {
                     // Approximate error propagation for speedup calculation
                     const relativeError = Math.sqrt(
-                        Math.pow(treatmentError / d.treatment_score, 2) + 
-                        Math.pow(baselineError / d.baseline_score, 2)
+                        Math.pow(te / d.treatment_score, 2) + 
+                        Math.pow(be / d.baseline_score, 2)
                     );
                     const speedupError = d.speedup * relativeError;
                     
-                    return {
-                        minus: speedupError,
-                        plus: speedupError
-                    };
+                    return { minus: speedupError, plus: speedupError };
                 }
                 
                 return { minus: 0, plus: 0 };
             });
             
-            // Create the chart with error bars
+            // Define custom plugin to draw error bars (register at top-level, not options.plugins)
+            const errorBarsPlugin = {
+                id: 'errorBars',
+                afterDatasetsDraw(chart) {
+                    const ctx = chart.ctx;
+                    const meta = chart.getDatasetMeta(0);
+                    if (!meta || !meta.data) return;
+                    
+                    const yScale = chart.scales.y;
+                    ctx.save();
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 1.5;
+                    ctx.fillStyle = '#000';
+                    
+                    meta.data.forEach((bar, index) => {
+                        const eb = errorBars[index];
+                        if (!eb || (eb.minus <= 0 && eb.plus <= 0)) return;
+                        
+                        const x = bar.x;
+                        const v = speedups[index];
+                        const yMin = yScale.getPixelForValue(Math.max(0, v - eb.minus));
+                        const yMax = yScale.getPixelForValue(v + eb.plus);
+                        const yCtr = yScale.getPixelForValue(v);
+                        
+                        // vertical line
+                        ctx.beginPath();
+                        ctx.moveTo(x, yMin);
+                        ctx.lineTo(x, yMax);
+                        ctx.stroke();
+                        
+                        // caps
+                        ctx.beginPath();
+                        ctx.moveTo(x - 8, yMin); ctx.lineTo(x + 8, yMin);
+                        ctx.moveTo(x - 8, yMax); ctx.lineTo(x + 8, yMax);
+                        ctx.stroke();
+                        
+                        // center point
+                        ctx.beginPath();
+                        ctx.arc(x, yCtr, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                    
+                    ctx.restore();
+                }
+            };
+            
+            // Create the chart with plugin properly registered
             window.benchmarkChartInstance = new Chart(ctx, {
                 type: 'bar',
                 data: {
@@ -1381,10 +1420,10 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                         data: speedups,
                         backgroundColor: colors,
                         borderColor: colors,
-                        borderWidth: 1,
-                        errorBars: errorBars
+                        borderWidth: 1
                     }]
                 },
+                plugins: [errorBarsPlugin],
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
@@ -1419,83 +1458,25 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                             callbacks: {
                                 afterLabel: function(context) {
                                     const index = context.dataIndex;
-                                    const data = filteredData[index];
-                                    const errorBar = errorBars[index];
+                                    const d = filteredData[index];
+                                    const eb = errorBars[index];
                                     
-                                    let tooltipLines = [
-                                        `Mode: ${data.mode}`,
-                                        `Unit: ${data.unit}`,
-                                        `Improvement: ${data.improvement_percent.toFixed(2)}%`,
-                                        `Status: ${data.status}`
+                                    const lines = [
+                                        `Mode: ${d.mode}`,
+                                        `Unit: ${d.unit}`,
+                                        `Improvement: ${d.improvement_percent.toFixed(2)}%`,
+                                        `Status: ${d.status}`
                                     ];
                                     
-                                    if (errorBar.minus > 0 || errorBar.plus > 0) {
-                                        tooltipLines.push(`Confidence: ${(data.speedup - errorBar.minus).toFixed(2)}x - ${(data.speedup + errorBar.plus).toFixed(2)}x`);
+                                    if (eb.minus > 0 || eb.plus > 0) {
+                                        lines.push(`Confidence: ${(d.speedup - eb.minus).toFixed(2)}x – ${(d.speedup + eb.plus).toFixed(2)}x`);
                                     }
                                     
-                                    return tooltipLines;
+                                    return lines;
                                 }
                             }
                         }
-                    },
-                    // Register and use custom plugin to draw error bars
-                    plugins: [{
-                        id: 'errorBars',
-                        afterDatasetsDraw: function(chart) {
-                            const ctx = chart.ctx;
-                            const meta = chart.getDatasetMeta(0);
-                            
-                            if (!meta || !meta.data) return;
-                            
-                            ctx.save();
-                            ctx.strokeStyle = '#000';
-                            ctx.lineWidth = 1.5;
-                            
-                            meta.data.forEach((bar, index) => {
-                                const errorBar = errorBars[index];
-                                if (errorBar && (errorBar.minus > 0 || errorBar.plus > 0)) {
-                                    const x = bar.x;
-                                    const yScale = chart.scales.y;
-                                    const barTop = bar.y;
-                                    
-                                    // Calculate error bar positions
-                                    const speedupValue = speedups[index];
-                                    const minValue = Math.max(0, speedupValue - errorBar.minus);
-                                    const maxValue = speedupValue + errorBar.plus;
-                                    
-                                    const minY = yScale.getPixelForValue(minValue);
-                                    const maxY = yScale.getPixelForValue(maxValue);
-                                    
-                                    // Draw main vertical error bar line (thin line through the center of the bar)
-                                    ctx.beginPath();
-                                    ctx.moveTo(x, minY);
-                                    ctx.lineTo(x, maxY);
-                                    ctx.stroke();
-                                    
-                                    // Draw upper confidence interval cap (horizontal line at top)
-                                    ctx.beginPath();
-                                    ctx.moveTo(x - 8, maxY);
-                                    ctx.lineTo(x + 8, maxY);
-                                    ctx.stroke();
-                                    
-                                    // Draw lower confidence interval cap (horizontal line at bottom)
-                                    ctx.beginPath();
-                                    ctx.moveTo(x - 8, minY);
-                                    ctx.lineTo(x + 8, minY);
-                                    ctx.stroke();
-                                    
-                                    // Draw a small marker at the actual speedup value (center point)
-                                    const centerY = yScale.getPixelForValue(speedupValue);
-                                    ctx.fillStyle = '#000';
-                                    ctx.beginPath();
-                                    ctx.arc(x, centerY, 2, 0, 2 * Math.PI);
-                                    ctx.fill();
-                                }
-                            });
-                            
-                            ctx.restore();
-                        }
-                    }]
+                    }
                 }
             });
         }
@@ -1515,36 +1496,37 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             
             // Prepare data
             const data = filteredData.map((d, index) => {
-                // Calculate confidence intervals for speedup
-                const baselineConf = d.baseline_details.score_confidence;
-                const treatmentConf = d.treatment_details.score_confidence;
-                
+                const baselineConf = d.baseline_details.score_confidence || [];
+                const treatmentConf = d.treatment_details.score_confidence || [];
                 
                 let errorBar = { minus: 0, plus: 0 };
                 
-                if (baselineConf && baselineConf.length === 2 && 
-                    treatmentConf && treatmentConf.length === 2) {
-                    const higher_is_better = d.higher_is_better;
-                    let minSpeedup, maxSpeedup;
+                if (baselineConf.length === 2 && treatmentConf.length === 2) {
+                    const EPS = 1e-12;
+                    const bLo = Math.max(baselineConf[0], EPS);
+                    const bHi = Math.max(baselineConf[1], EPS);
+                    const tLo = Math.max(treatmentConf[0], EPS);
+                    const tHi = Math.max(treatmentConf[1], EPS);
                     
-                    if (higher_is_better) {
-                        minSpeedup = treatmentConf[0] / baselineConf[1];
-                        maxSpeedup = treatmentConf[1] / baselineConf[0];
+                    let minSpeedup, maxSpeedup;
+                    if (d.higher_is_better) {
+                        minSpeedup = tLo / bHi;
+                        maxSpeedup = tHi / bLo;
                     } else {
-                        minSpeedup = baselineConf[0] / treatmentConf[1];
-                        maxSpeedup = baselineConf[1] / treatmentConf[0];
+                        minSpeedup = bLo / tHi;
+                        maxSpeedup = bHi / tLo;
                     }
                     
                     errorBar = {
-                        minus: Math.abs(d.speedup - minSpeedup),
-                        plus: Math.abs(maxSpeedup - d.speedup)
+                        minus: Math.max(0, d.speedup - minSpeedup),
+                        plus: Math.max(0, maxSpeedup - d.speedup)
                     };
                 }
                 
                 return {
                     label: d.display_name || d.benchmark,
                     speedup: d.speedup,
-                    color: d.status === 'improved' ? '#0066cc' : d.status === 'regressed' ? '#ff6600' : '#6c757d',  // Colorblind friendly colors
+                    color: d.status === 'improved' ? '#0066cc' : d.status === 'regressed' ? '#ff6600' : '#6c757d',
                     errorBar: errorBar,
                     data: d
                 };
@@ -1553,9 +1535,9 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             // Calculate scales
             const maxSpeedup = Math.max(...data.map(d => d.speedup + d.errorBar.plus));
             const minSpeedup = Math.min(0, ...data.map(d => d.speedup - d.errorBar.minus));
-            const yScale = chartHeight / (maxSpeedup - minSpeedup);
-            const barWidth = chartWidth / data.length * 0.8;
-            const barSpacing = chartWidth / data.length;
+            const yScale = (height - margin.top - margin.bottom) / (maxSpeedup - minSpeedup);
+            const barWidth = (width - margin.left - margin.right) / data.length * 0.8;
+            const barSpacing = (width - margin.left - margin.right) / data.length;
             
             // Create SVG
             const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1613,6 +1595,7 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             
             // Draw bars and error bars
             data.forEach((d, index) => {
+                const chartHeight = height - margin.top - margin.bottom;
                 const x = margin.left + index * barSpacing + (barSpacing - barWidth) / 2;
                 const barHeight = (d.speedup - minSpeedup) * yScale;
                 const y = height - margin.bottom - barHeight;
