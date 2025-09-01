@@ -191,8 +191,11 @@ def calculate_statistical_significance(baseline: BenchmarkResult, treatment: Ben
     treatment_iterations = treatment.measurement_iterations
     
     # If either has only 1 sample or insufficient data, return insufficient data indicator
-    if (baseline_iterations <= 1 or treatment_iterations <= 1 or 
-        baseline.forks <= 1 or treatment.forks <= 1):
+    if (baseline_iterations <= 1 or treatment_iterations <= 1):
+        print(f"WARNING: Insufficient data to compute statistical difference for benchmark '{baseline.benchmark}' - "
+              f"baseline iterations: {baseline_iterations}, treatment iterations: {treatment_iterations}, "
+              f"baseline forks: {baseline.forks}, treatment forks: {treatment.forks}. "
+              f"Need at least 2 measurement iterations for both baseline and treatment to compute statistical significance.")
         return {
             'is_significant': None,  # None indicates insufficient data
             'confidence_level': '?',
@@ -474,6 +477,18 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>""" + report_title + """</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Fallback chart implementation using SVG when Chart.js fails to load
+        let chartJsLoaded = false;
+        
+        // Check if Chart.js loaded successfully
+        window.addEventListener('load', function() {
+            chartJsLoaded = typeof Chart !== 'undefined';
+            if (!chartJsLoaded) {
+                console.log('Chart.js not available, using fallback SVG chart');
+            }
+        });
+    </script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -1273,6 +1288,20 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
         
         function showBarChart() {
             const modal = document.getElementById('chartModal');
+            
+            // Check if Chart.js is available
+            if (typeof Chart !== 'undefined') {
+                // Use Chart.js implementation
+                showChartJsBarChart();
+            } else {
+                // Use fallback SVG implementation
+                showSvgBarChart();
+            }
+            
+            modal.style.display = 'block';
+        }
+        
+        function showChartJsBarChart() {
             const canvas = document.getElementById('benchmarkChart');
             const ctx = canvas.getContext('2d');
             
@@ -1285,12 +1314,64 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
             const labels = filteredData.map(d => d.display_name || d.benchmark);
             const speedups = filteredData.map(d => d.speedup);
             const colors = filteredData.map(d => {
-                if (d.status === 'improved') return '#28a745';
-                if (d.status === 'regressed') return '#dc3545';
+                if (d.status === 'improved') return '#0066cc';  // Blue for improved (colorblind friendly)
+                if (d.status === 'regressed') return '#ff6600'; // Orange for regressed (colorblind friendly)
                 return '#6c757d';
             });
             
-            // Create the chart
+            // Prepare confidence interval data for error bars
+            const errorBars = filteredData.map((d, index) => {
+                // Calculate confidence intervals for speedup based on baseline and treatment confidence intervals
+                const baselineConf = d.baseline_details.score_confidence;
+                const treatmentConf = d.treatment_details.score_confidence;
+                
+                console.log(`Debug benchmark ${index}:`, d.benchmark);
+                console.log('Baseline confidence:', baselineConf);
+                console.log('Treatment confidence:', treatmentConf);
+                
+                if (baselineConf && baselineConf.length === 2 && treatmentConf && treatmentConf.length === 2) {
+                    // Calculate speedup confidence interval
+                    const higher_is_better = d.higher_is_better;
+                    let minSpeedup, maxSpeedup;
+                    
+                    if (higher_is_better) {
+                        // For throughput: speedup = treatment / baseline
+                        minSpeedup = treatmentConf[0] / baselineConf[1]; // min treatment / max baseline
+                        maxSpeedup = treatmentConf[1] / baselineConf[0]; // max treatment / min baseline
+                    } else {
+                        // For latency: speedup = baseline / treatment
+                        minSpeedup = baselineConf[0] / treatmentConf[1]; // min baseline / max treatment
+                        maxSpeedup = baselineConf[1] / treatmentConf[0]; // max baseline / min treatment
+                    }
+                    
+                    return {
+                        minus: Math.abs(d.speedup - minSpeedup),
+                        plus: Math.abs(maxSpeedup - d.speedup)
+                    };
+                }
+                
+                // Fallback to using score errors if confidence intervals not available
+                const baselineError = d.baseline_error;
+                const treatmentError = d.treatment_error;
+                
+                if (baselineError > 0 && treatmentError > 0) {
+                    // Approximate error propagation for speedup calculation
+                    const relativeError = Math.sqrt(
+                        Math.pow(treatmentError / d.treatment_score, 2) + 
+                        Math.pow(baselineError / d.baseline_score, 2)
+                    );
+                    const speedupError = d.speedup * relativeError;
+                    
+                    return {
+                        minus: speedupError,
+                        plus: speedupError
+                    };
+                }
+                
+                return { minus: 0, plus: 0 };
+            });
+            
+            // Create the chart with error bars
             window.benchmarkChartInstance = new Chart(ctx, {
                 type: 'bar',
                 data: {
@@ -1300,7 +1381,8 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                         data: speedups,
                         backgroundColor: colors,
                         borderColor: colors,
-                        borderWidth: 1
+                        borderWidth: 1,
+                        errorBars: errorBars
                     }]
                 },
                 options: {
@@ -1328,7 +1410,7 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                     plugins: {
                         title: {
                             display: true,
-                            text: 'Benchmark Performance Speedup'
+                            text: 'Benchmark Performance Speedup (with Confidence Intervals)'
                         },
                         legend: {
                             display: false
@@ -1338,20 +1420,296 @@ def generate_html_report(comparison_data: List[Dict], experiment_details: Dict[s
                                 afterLabel: function(context) {
                                     const index = context.dataIndex;
                                     const data = filteredData[index];
-                                    return [
+                                    const errorBar = errorBars[index];
+                                    
+                                    let tooltipLines = [
                                         `Mode: ${data.mode}`,
                                         `Unit: ${data.unit}`,
                                         `Improvement: ${data.improvement_percent.toFixed(2)}%`,
                                         `Status: ${data.status}`
                                     ];
+                                    
+                                    if (errorBar.minus > 0 || errorBar.plus > 0) {
+                                        tooltipLines.push(`Confidence: ${(data.speedup - errorBar.minus).toFixed(2)}x - ${(data.speedup + errorBar.plus).toFixed(2)}x`);
+                                    }
+                                    
+                                    return tooltipLines;
                                 }
                             }
                         }
-                    }
+                    },
+                    // Register and use custom plugin to draw error bars
+                    plugins: [{
+                        id: 'errorBars',
+                        afterDatasetsDraw: function(chart) {
+                            const ctx = chart.ctx;
+                            const meta = chart.getDatasetMeta(0);
+                            
+                            if (!meta || !meta.data) return;
+                            
+                            ctx.save();
+                            ctx.strokeStyle = '#000';
+                            ctx.lineWidth = 1.5;
+                            
+                            meta.data.forEach((bar, index) => {
+                                const errorBar = errorBars[index];
+                                if (errorBar && (errorBar.minus > 0 || errorBar.plus > 0)) {
+                                    const x = bar.x;
+                                    const yScale = chart.scales.y;
+                                    const barTop = bar.y;
+                                    
+                                    // Calculate error bar positions
+                                    const speedupValue = speedups[index];
+                                    const minValue = Math.max(0, speedupValue - errorBar.minus);
+                                    const maxValue = speedupValue + errorBar.plus;
+                                    
+                                    const minY = yScale.getPixelForValue(minValue);
+                                    const maxY = yScale.getPixelForValue(maxValue);
+                                    
+                                    // Draw main vertical error bar line (thin line through the center of the bar)
+                                    ctx.beginPath();
+                                    ctx.moveTo(x, minY);
+                                    ctx.lineTo(x, maxY);
+                                    ctx.stroke();
+                                    
+                                    // Draw upper confidence interval cap (horizontal line at top)
+                                    ctx.beginPath();
+                                    ctx.moveTo(x - 8, maxY);
+                                    ctx.lineTo(x + 8, maxY);
+                                    ctx.stroke();
+                                    
+                                    // Draw lower confidence interval cap (horizontal line at bottom)
+                                    ctx.beginPath();
+                                    ctx.moveTo(x - 8, minY);
+                                    ctx.lineTo(x + 8, minY);
+                                    ctx.stroke();
+                                    
+                                    // Draw a small marker at the actual speedup value (center point)
+                                    const centerY = yScale.getPixelForValue(speedupValue);
+                                    ctx.fillStyle = '#000';
+                                    ctx.beginPath();
+                                    ctx.arc(x, centerY, 2, 0, 2 * Math.PI);
+                                    ctx.fill();
+                                }
+                            });
+                            
+                            ctx.restore();
+                        }
+                    }]
                 }
             });
+        }
+        
+        function showSvgBarChart() {
+            const chartContainer = document.querySelector('#chartModal .modal-content > div');
             
-            modal.style.display = 'block';
+            // Clear existing content
+            chartContainer.innerHTML = '<h3 style="text-align: center; margin-bottom: 20px;">Benchmark Performance Speedup (with Confidence Intervals)</h3>';
+            
+            // Calculate chart dimensions
+            const width = 800;
+            const height = 400;
+            const margin = { top: 20, right: 30, bottom: 80, left: 60 };
+            const chartWidth = width - margin.left - margin.right;
+            const chartHeight = height - margin.top - margin.bottom;
+            
+            // Prepare data
+            const data = filteredData.map((d, index) => {
+                // Calculate confidence intervals for speedup
+                const baselineConf = d.baseline_details.score_confidence;
+                const treatmentConf = d.treatment_details.score_confidence;
+                
+                
+                let errorBar = { minus: 0, plus: 0 };
+                
+                if (baselineConf && baselineConf.length === 2 && 
+                    treatmentConf && treatmentConf.length === 2) {
+                    const higher_is_better = d.higher_is_better;
+                    let minSpeedup, maxSpeedup;
+                    
+                    if (higher_is_better) {
+                        minSpeedup = treatmentConf[0] / baselineConf[1];
+                        maxSpeedup = treatmentConf[1] / baselineConf[0];
+                    } else {
+                        minSpeedup = baselineConf[0] / treatmentConf[1];
+                        maxSpeedup = baselineConf[1] / treatmentConf[0];
+                    }
+                    
+                    errorBar = {
+                        minus: Math.abs(d.speedup - minSpeedup),
+                        plus: Math.abs(maxSpeedup - d.speedup)
+                    };
+                }
+                
+                return {
+                    label: d.display_name || d.benchmark,
+                    speedup: d.speedup,
+                    color: d.status === 'improved' ? '#0066cc' : d.status === 'regressed' ? '#ff6600' : '#6c757d',  // Colorblind friendly colors
+                    errorBar: errorBar,
+                    data: d
+                };
+            });
+            
+            // Calculate scales
+            const maxSpeedup = Math.max(...data.map(d => d.speedup + d.errorBar.plus));
+            const minSpeedup = Math.min(0, ...data.map(d => d.speedup - d.errorBar.minus));
+            const yScale = chartHeight / (maxSpeedup - minSpeedup);
+            const barWidth = chartWidth / data.length * 0.8;
+            const barSpacing = chartWidth / data.length;
+            
+            // Create SVG
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', width);
+            svg.setAttribute('height', height);
+            svg.style.border = '1px solid #ddd';
+            svg.style.backgroundColor = 'white';
+            
+            // Draw Y-axis
+            const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            yAxis.setAttribute('x1', margin.left);
+            yAxis.setAttribute('y1', margin.top);
+            yAxis.setAttribute('x2', margin.left);
+            yAxis.setAttribute('y2', height - margin.bottom);
+            yAxis.setAttribute('stroke', '#333');
+            yAxis.setAttribute('stroke-width', '1');
+            svg.appendChild(yAxis);
+            
+            // Draw X-axis
+            const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            xAxis.setAttribute('x1', margin.left);
+            xAxis.setAttribute('y1', height - margin.bottom);
+            xAxis.setAttribute('x2', width - margin.right);
+            xAxis.setAttribute('y2', height - margin.bottom);
+            xAxis.setAttribute('stroke', '#333');
+            xAxis.setAttribute('stroke-width', '1');
+            svg.appendChild(xAxis);
+            
+            // Draw Y-axis labels and grid lines
+            const yTicks = 5;
+            for (let i = 0; i <= yTicks; i++) {
+                const value = minSpeedup + (maxSpeedup - minSpeedup) * i / yTicks;
+                const y = height - margin.bottom - (value - minSpeedup) * yScale;
+                
+                // Grid line
+                const gridLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                gridLine.setAttribute('x1', margin.left);
+                gridLine.setAttribute('y1', y);
+                gridLine.setAttribute('x2', width - margin.right);
+                gridLine.setAttribute('y2', y);
+                gridLine.setAttribute('stroke', '#eee');
+                gridLine.setAttribute('stroke-width', '1');
+                svg.appendChild(gridLine);
+                
+                // Label
+                const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', margin.left - 10);
+                label.setAttribute('y', y + 4);
+                label.setAttribute('text-anchor', 'end');
+                label.setAttribute('font-size', '12');
+                label.setAttribute('fill', '#666');
+                label.textContent = value.toFixed(1) + 'x';
+                svg.appendChild(label);
+            }
+            
+            // Draw bars and error bars
+            data.forEach((d, index) => {
+                const x = margin.left + index * barSpacing + (barSpacing - barWidth) / 2;
+                const barHeight = (d.speedup - minSpeedup) * yScale;
+                const y = height - margin.bottom - barHeight;
+                
+                // Draw bar
+                const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                bar.setAttribute('x', x);
+                bar.setAttribute('y', y);
+                bar.setAttribute('width', barWidth);
+                bar.setAttribute('height', barHeight);
+                bar.setAttribute('fill', d.color);
+                bar.setAttribute('stroke', d.color);
+                bar.setAttribute('stroke-width', '1');
+                svg.appendChild(bar);
+                
+                // Draw error bars if available
+                if (d.errorBar.minus > 0 || d.errorBar.plus > 0) {
+                    const centerX = x + barWidth / 2;
+                    const minY = height - margin.bottom - (d.speedup - d.errorBar.minus - minSpeedup) * yScale;
+                    const maxY = height - margin.bottom - (d.speedup + d.errorBar.plus - minSpeedup) * yScale;
+                    const centerY = height - margin.bottom - (d.speedup - minSpeedup) * yScale;
+                    
+                    // Vertical line
+                    const errorLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    errorLine.setAttribute('x1', centerX);
+                    errorLine.setAttribute('y1', minY);
+                    errorLine.setAttribute('x2', centerX);
+                    errorLine.setAttribute('y2', maxY);
+                    errorLine.setAttribute('stroke', '#000');
+                    errorLine.setAttribute('stroke-width', '2');
+                    svg.appendChild(errorLine);
+                    
+                    // Top cap
+                    const topCap = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    topCap.setAttribute('x1', centerX - 8);
+                    topCap.setAttribute('y1', maxY);
+                    topCap.setAttribute('x2', centerX + 8);
+                    topCap.setAttribute('y2', maxY);
+                    topCap.setAttribute('stroke', '#000');
+                    topCap.setAttribute('stroke-width', '2');
+                    svg.appendChild(topCap);
+                    
+                    // Bottom cap
+                    const bottomCap = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    bottomCap.setAttribute('x1', centerX - 8);
+                    bottomCap.setAttribute('y1', minY);
+                    bottomCap.setAttribute('x2', centerX + 8);
+                    bottomCap.setAttribute('y2', minY);
+                    bottomCap.setAttribute('stroke', '#000');
+                    bottomCap.setAttribute('stroke-width', '2');
+                    svg.appendChild(bottomCap);
+                    
+                    // Center point
+                    const centerPoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    centerPoint.setAttribute('cx', centerX);
+                    centerPoint.setAttribute('cy', centerY);
+                    centerPoint.setAttribute('r', '3');
+                    centerPoint.setAttribute('fill', '#000');
+                    svg.appendChild(centerPoint);
+                }
+                
+                // X-axis label
+                const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', x + barWidth / 2);
+                label.setAttribute('y', height - margin.bottom + 15);
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('font-size', '10');
+                label.setAttribute('fill', '#666');
+                label.textContent = d.label.length > 15 ? d.label.substring(0, 12) + '...' : d.label;
+                svg.appendChild(label);
+            });
+            
+            // Add Y-axis title
+            const yTitle = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            yTitle.setAttribute('x', 20);
+            yTitle.setAttribute('y', height / 2);
+            yTitle.setAttribute('text-anchor', 'middle');
+            yTitle.setAttribute('font-size', '12');
+            yTitle.setAttribute('fill', '#333');
+            yTitle.setAttribute('transform', `rotate(-90, 20, ${height / 2})`);
+            yTitle.textContent = 'Speedup Factor (x)';
+            svg.appendChild(yTitle);
+            
+            chartContainer.appendChild(svg);
+            
+            // Add legend
+            const legend = document.createElement('div');
+            legend.style.textAlign = 'center';
+            legend.style.marginTop = '10px';
+            legend.style.fontSize = '12px';
+            legend.innerHTML = `
+                <span style="color: #0066cc;">■ Improved</span> &nbsp;&nbsp;
+                <span style="color: #ff6600;">■ Regressed</span> &nbsp;&nbsp;
+                <span style="color: #6c757d;">■ Unchanged</span> &nbsp;&nbsp;
+                <span style="color: #000;">| Error bars show confidence intervals</span>
+            `;
+            chartContainer.appendChild(legend);
         }
         
         function closeChartModal() {
